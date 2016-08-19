@@ -335,7 +335,7 @@ class TiffWriter(object):
 
     """
     TYPES = {'B': 1, 's': 2, 'H': 3, 'I': 4, '2I': 5, 'b': 6,
-             'h': 8, 'i': 9, 'f': 11, 'd': 12, 'Q': 16, 'q': 17}
+             'h': 8, 'i': 9, '2i': 10, 'f': 11, 'd': 12, 'Q': 16, 'q': 17}
     TAGS = {
         'new_subfile_type': 254, 'subfile_type': 255,
         'image_width': 256, 'image_length': 257, 'bits_per_sample': 258,
@@ -348,7 +348,11 @@ class TiffWriter(object):
         'tile_width': 322, 'tile_length': 323, 'tile_offsets': 324,
         'tile_byte_counts': 325, 'extra_samples': 338, 'sample_format': 339,
         'smin_sample_value': 340, 'smax_sample_value': 341,
-        'image_depth': 32997, 'tile_depth': 32998}
+        'image_depth': 32997, 'tile_depth': 32998, 'cfa_repeat_pattern_dim': 33421,
+        'cfa_pattern': 33422, 'dng_version': 50706, 'unique_camera_model': 50708,
+        'black_level': 50714, 'black_level_repeat_dim': 50713, 'white_level': 50717,
+        'color_matrix_1': 50721, 'camera_calibration_1': 50723, 'as_shot_neutral': 50728,
+        'calibration_illuminant_1': 50778}
 
     def __init__(self, file, bigtiff=False, byteorder=None,
                  software='tifffile.py', imagej=False):
@@ -430,7 +434,10 @@ class TiffWriter(object):
         self._fh.write(struct.pack(byteorder+self._offset_format, 0))
 
     def save(self, data, photometric=None, planarconfig=None, resolution=None,
-             compress=0, colormap=None, tile=None, datetime=None,
+             compress=0, colormap=None, cfa_pattern=None, color_matrix_1=None, 
+             calibration_illuminant_1=None, camera_calibration_1=None, 
+             white_level=None, black_level=None,
+             as_shot_neutral=None, tile=None, datetime=None,
              description=None, metadata={}, contiguous=True, extratags=()):
         """Write image data and tags to TIFF file.
 
@@ -448,7 +455,7 @@ class TiffWriter(object):
             If a colormap is provided, the dtype must be uint8 or uint16 and
             the data values are indices into the last dimension of the
             colormap.
-        photometric : {'minisblack', 'miniswhite', 'rgb', 'palette'}
+        photometric : {'minisblack', 'miniswhite', 'rgb', 'palette','cfa'}
             The color space of the image data.
             By default this setting is inferred from the data shape and the
             value of colormap.
@@ -468,6 +475,14 @@ class TiffWriter(object):
         colormap : numpy.ndarray
             RGB color values for the corresponding data value.
             Must be of shape (3, 2**(data.itemsize*8)) and dtype uint16.
+        cfa_pattern: tuple/array/list of int
+            Color sampling in the color filter array pattern
+        color_matrix_1: array of float
+            Transformation matrix that converts XYZ values to reference camera 
+            native color space values. Calibrated under illuminant 1
+        camera_calibration_1: array of float
+        calibration_illuminant_1: int
+        as_shot_neutral: array of float
         tile : tuple of int
             The shape (depth, length, width) of image tiles to write.
             If None (default), image data are written in one stripe per plane.
@@ -497,7 +512,7 @@ class TiffWriter(object):
                 The TIFF tag Id.
             dtype : str
                 Data type of items in 'value' in Python struct format.
-                One of B, s, H, I, 2I, b, h, i, f, d, Q, or q.
+                One of B, s, H, I, 2I, b, h, i, 2i, f, d, Q, or q.
             count : int
                 Number of data values. Not used for string values.
             value : sequence
@@ -544,7 +559,7 @@ class TiffWriter(object):
                     return
 
         if photometric not in (None, 'minisblack', 'miniswhite',
-                               'rgb', 'palette'):
+                               'rgb', 'palette','cfa'):
             raise ValueError("invalid photometric %s" % photometric)
         if planarconfig not in (None, 'contig', 'planar'):
             raise ValueError("invalid planarconfig %s" % planarconfig)
@@ -662,6 +677,14 @@ class TiffWriter(object):
                 samplesperpixel = data.shape[1]
             if samplesperpixel > 3:
                 extrasamples = samplesperpixel - 3
+        elif photometric == 'cfa':
+            if len(shape) > 2:
+                raise ValueError("cfa photometric requires a single-channel image")
+            planarconfig = None
+            data = data.reshape((-1, 1) + shape[(-3 if volume else -2):] + (1,))
+            samplesperpixel = 1
+            if cfa_pattern is None:
+                cfa_pattern = [2, 1, 1, 0]
         elif planarconfig and len(shape) > (3 if volume else 2):
             if planarconfig == 'contig':
                 data = data.reshape((-1, 1) + shape[(-4 if volume else -3):])
@@ -741,6 +764,7 @@ class TiffWriter(object):
             if len(dtype) > 1:
                 count *= int(dtype[:-1])
                 dtype = dtype[-1]
+                print(count, dtype)
             ifdentry = [pack('HH', code, tifftype),
                         pack(offset_format, rawcount)]
             ifdvalue = None
@@ -817,7 +841,7 @@ class TiffWriter(object):
         addtag('sample_format', 'H', 1,
                {'u': 1, 'i': 2, 'f': 3, 'c': 6}[data.dtype.kind])
         addtag('photometric', 'H', 1, {'miniswhite': 0, 'minisblack': 1,
-                                       'rgb': 2, 'palette': 3}[photometric])
+                                       'rgb': 2, 'palette': 3, 'cfa':32803}[photometric])
         if colormap is not None:
             addtag('color_map', 'H', colormap.size, colormap)
         addtag('samples_per_pixel', 'H', 1, samplesperpixel)
@@ -839,6 +863,46 @@ class TiffWriter(object):
             addtag('resolution_unit', 'H', 1, 2)
         if not tile:
             addtag('rows_per_strip', 'I', 1, shape[-3])  # * shape[-4]
+
+        if photometric=='cfa':
+            addtag('dng_version','B',4,[1,4,0,0])
+            addtag('unique_camera_model', 's', 0, "tifffile", writeonce=True)
+            addtag('cfa_repeat_pattern_dim', 'H', 2, [2,2])
+            addtag('cfa_pattern', 'B', 4, cfa_pattern)
+
+            if not black_level is None:
+                addtag('black_level', 'I', 1, black_level)
+                addtag('black_level_repeat_dim', 'H', 2, [1,1])
+
+            if not white_level is None:
+                addtag('white_level', 'I', 1, white_level)
+            
+            if not as_shot_neutral is None:
+                neutr = []
+                for f in as_shot_neutral:
+                    rat = rational(f, max_denominator=10000)
+                    neutr.append(rat[0])
+                    neutr.append(rat[1])                
+                addtag('as_shot_neutral', '2i', 3, neutr)
+                        
+            if not calibration_illuminant_1 is None:
+                addtag('calibration_illuminant_1', 'H', 1, calibration_illuminant_1)
+            
+            if not color_matrix_1 is None:
+                ccm = []
+                for val in color_matrix_1.flatten():
+                    rat = rational(val, max_denominator=10000)
+                    ccm.append(rat[0])
+                    ccm.append(rat[1])
+                addtag('color_matrix_1', '2i', 9, ccm)
+                 
+            if not camera_calibration_1 is None:
+                ccm = []
+                for val in camera_calibration_1.flatten():
+                    rat = rational(val, max_denominator=10000)
+                    ccm.append(rat[0])
+                    ccm.append(rat[1])
+                addtag('camera_calibration_1', '2i', 9, ccm)                
 
         if tile:
             # use one chunk per tile per plane
